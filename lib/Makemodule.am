@@ -30,7 +30,8 @@ libcryptsetup_la_LIBADD = \
 	@CRYPTO_LIBS@		\
 	@LIBARGON2_LIBS@	\
 	@JSON_C_LIBS@		\
-	libcrypto_backend.la
+	libcrypto_backend.la \
+    @TSS2_ESYS_LIBS@
 
 libcryptsetup_la_SOURCES = \
 	lib/setup.c			\

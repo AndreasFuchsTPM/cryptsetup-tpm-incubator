@@ -29,6 +29,10 @@ if INTEGRITYSETUP
 TESTS += integrity-compat-test
 endif
 
+if WITH_TPM
+TESTS += lukstpm
+endif
+
 EXTRA_DIST = compatimage.img.bz2 compatv10image.img.bz2 \
 	compatimage2.img.xz \
 	conversion_imgs.tar.xz \

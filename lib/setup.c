@@ -5,6 +5,7 @@
  * Copyright (C) 2004-2007, Clemens Fruhwirth <clemens@endorphin.org>
  * Copyright (C) 2009-2018, Red Hat, Inc. All rights reserved.
  * Copyright (C) 2009-2018, Milan Broz
+ * Copyright (C) 2018, Fraunhofer SIT sponsored by Infineon Technologies AG
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -28,6 +29,7 @@
 #include <sys/utsname.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <tss2/tss2_esys.h>
 
 #include "libcryptsetup.h"
 #include "luks.h"
@@ -4539,3 +4541,792 @@ static void __attribute__((destructor)) libcryptsetup_exit(void)
 {
 	crypt_backend_destroy();
 }
+
+#ifdef WITH_TPM
+
+static TSS2_RC tpm_init(struct crypt_device *cd,
+    ESYS_CONTEXT **ctx)
+{
+    (void)(cd); /* Only needed for log_err */
+    TSS2_RC r;
+	log_dbg("Initializing ESYS connection");
+
+    r = Esys_Initialize(ctx, NULL, NULL);
+    if (r != TSS2_RC_SUCCESS) {
+    	log_err(cd, "Error initializing ESYS: %08x", r);
+        return r;
+    }
+    r = Esys_Startup(*ctx, TPM2_SU_CLEAR);
+    if (r == TPM2_RC_INITIALIZE) {
+    	log_dbg("TPM already started up. Not an error !");
+        r = TSS2_RC_SUCCESS;
+    }
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM StartUp command failed: %08x", r);
+        Esys_Finalize(ctx);
+    }
+    return r;
+}
+
+static TSS2_RC tpm_policy_init_ChangeAuth(struct crypt_device *cd,
+    ESYS_CONTEXT *ctx,
+    TPM2_SE type,
+    ESYS_TR *session)
+{
+    (void)(cd);
+    TSS2_RC r;
+
+    TPMT_SYM_DEF sym = {.algorithm = TPM2_ALG_AES,
+                        .keyBits = {.aes = 128},
+                        .mode = {.aes = TPM2_ALG_CFB}
+    };
+
+    r = Esys_StartAuthSession(ctx, ESYS_TR_NONE, ESYS_TR_NONE,
+                    ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                    NULL, type, &sym, TPM2_ALG_SHA256,
+                    session);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    r = Esys_PolicyPassword(ctx, *session,
+                    ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE);
+    if (r != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(ctx, *session);
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    r = Esys_PolicyCommandCode(ctx, *session,
+                    ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                    TPM2_CC_NV_ChangeAuth);
+    if (r != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(ctx, *session);
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    return TSS2_RC_SUCCESS;
+}
+
+static TSS2_RC tpm_policy_define_ChangeAuth(struct crypt_device *cd,
+    ESYS_CONTEXT *ctx,
+    TPM2B_DIGEST *authPolicy)
+{
+    (void)(cd);
+    TSS2_RC r;
+    ESYS_TR session;
+    TPM2B_DIGEST *policyDigest;
+
+    r = tpm_policy_init_ChangeAuth(cd, ctx, TPM2_SE_TRIAL, &session);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    r = Esys_PolicyGetDigest(ctx, session,
+                    ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                    &policyDigest);
+    Esys_FlushContext(ctx, session);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    *authPolicy = *policyDigest;
+    free(policyDigest);
+
+    return TSS2_RC_SUCCESS;
+}
+
+static TSS2_RC tpm_policy_define_Read(struct crypt_device *cd,
+    ESYS_CONTEXT *ctx, int tpm_pcr, TPM2B_DIGEST *authPolicy);
+
+static TSS2_RC tpm_policy_exec_ChangeAuth(struct crypt_device *cd,
+    ESYS_CONTEXT *ctx,
+    int tpm_pcr,
+    ESYS_TR *sess)
+{
+    (void)(cd);
+    TSS2_RC r;
+    ESYS_TR session;
+    TPM2B_DIGEST *policyDigest;
+
+    TPML_DIGEST orList = { .count = 2, .digests = {} };
+
+    r = tpm_policy_define_Read(cd, ctx, tpm_pcr, &orList.digests[1]);
+    if (r != TSS2_RC_SUCCESS) {
+        return r;
+    }
+
+    r = tpm_policy_init_ChangeAuth(cd, ctx, TPM2_SE_POLICY, &session);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    r = Esys_PolicyGetDigest(ctx, session,
+                    ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                    &policyDigest);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        Esys_FlushContext(ctx, session);
+        return r;
+    }
+    orList.digests[0] = *policyDigest;
+    free(policyDigest);
+
+    r = Esys_PolicyOR(ctx, session,
+                      ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                      &orList);
+    if (r != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(ctx, session);
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    *sess = session;
+
+    return TSS2_RC_SUCCESS;
+}
+
+static TSS2_RC tpm_getPcrDigest(struct crypt_device *cd,
+    ESYS_CONTEXT *ctx,
+    const TPML_PCR_SELECTION *pcrs,
+    TPM2_ALG_ID hashAlg,
+    TPM2B_DIGEST *pcrDigest)
+{
+    TSS2_RC r;
+    TPM2B_AUTH auth = {0};
+    ESYS_TR hash;
+    TPML_DIGEST *value;
+    TPML_PCR_SELECTION readPCRs = { .count = 1, .pcrSelections = {} };
+    TPM2B_DIGEST *returnPcrDigest;
+
+    r = Esys_HashSequenceStart(ctx,
+                               ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                               &auth, hashAlg, &hash);
+    if (r)
+        return r;
+
+    for (int i = 0; i < pcrs->count; i++) {
+        readPCRs.pcrSelections[0].hash = pcrs->pcrSelections[i].hash;
+        readPCRs.pcrSelections[0].sizeofSelect = 3;
+        for (int j = 0; j < 24; j++) {
+            if (!(pcrs->pcrSelections[i].pcrSelect[j / 8] & (1 << (j % 8))))
+                continue;
+            
+            readPCRs.pcrSelections[0].pcrSelect[0] = 0;
+            readPCRs.pcrSelections[0].pcrSelect[1] = 0;
+            readPCRs.pcrSelections[0].pcrSelect[2] = 0;
+
+            readPCRs.pcrSelections[0].pcrSelect[j / 8] = (1 << (j % 8));
+
+            r = Esys_PCR_Read(ctx,
+                              ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                              &readPCRs, NULL, NULL, &value);
+            if (r == 0x984) continue;
+            if (r) return r;
+            if (!value->count) {
+                free(value);
+                continue;
+            }
+
+            r = Esys_SequenceUpdate(ctx, hash,
+                            ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
+                            (const TPM2B_MAX_BUFFER *)&value->digests[0]);
+            free(value);
+            if (r) return r;
+        }
+    }
+    r = Esys_SequenceComplete(ctx, hash,
+                              ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
+                              NULL, TPM2_RH_NULL,
+                              &returnPcrDigest, NULL);
+    if (r) return r;
+    *pcrDigest = *returnPcrDigest;
+    free(returnPcrDigest);
+
+    return 0;
+}
+
+static TSS2_RC tpm_policy_init_Read(struct crypt_device *cd,
+    ESYS_CONTEXT *ctx,
+    int tpm_pcr,
+    TPM2_SE type,
+    ESYS_TR *session)
+{
+    (void)(cd);
+    TSS2_RC r;
+
+    TPM2B_DIGEST pcrDigest = { .size = 0, .buffer = {} };
+    TPML_PCR_SELECTION pcrs = { .count = 2, .pcrSelections = {
+        { .hash = TPM2_ALG_SHA1, .sizeofSelect = 3,
+          .pcrSelect = { tpm_pcr & 0xff, tpm_pcr >>8 & 0xff, tpm_pcr >>16 & 0xff }},
+        { .hash = TPM2_ALG_SHA256, .sizeofSelect = 3,
+          .pcrSelect = { tpm_pcr & 0xff, tpm_pcr >>8 & 0xff, tpm_pcr >>16 & 0xff }}
+    }};
+
+    TPMT_SYM_DEF sym = {.algorithm = TPM2_ALG_AES,
+                        .keyBits = {.aes = 128},
+                        .mode = {.aes = TPM2_ALG_CFB}
+    };
+
+    r = tpm_getPcrDigest(cd, ctx, &pcrs, TPM2_ALG_SHA256, &pcrDigest);
+    if (r != TSS2_RC_SUCCESS) {
+        return r;
+    }
+
+    r = Esys_StartAuthSession(ctx, ESYS_TR_NONE, ESYS_TR_NONE,
+                    ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                    NULL, type, &sym, TPM2_ALG_SHA256,
+                    session);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    r = Esys_PolicyPCR(ctx, *session,
+                    ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                    &pcrDigest, &pcrs);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        Esys_FlushContext(ctx, *session);
+        return r;
+    }
+
+    r = Esys_PolicyPassword(ctx, *session,
+                    ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE);
+    if (r != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(ctx, *session);
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    r = Esys_PolicyCommandCode(ctx, *session,
+                    ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                    TPM2_CC_NV_Read);
+    if (r != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(ctx, *session);
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    return TSS2_RC_SUCCESS;
+}
+
+static TSS2_RC tpm_policy_define_Read(struct crypt_device *cd,
+    ESYS_CONTEXT *ctx,
+    int tpm_pcr,
+    TPM2B_DIGEST *authPolicy)
+{
+    (void)(cd);
+    TSS2_RC r;
+    ESYS_TR session;
+    TPM2B_DIGEST *policyDigest;
+
+    r = tpm_policy_init_Read(cd, ctx, tpm_pcr, TPM2_SE_TRIAL, &session);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    r = Esys_PolicyGetDigest(ctx, session,
+                    ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                    &policyDigest);
+    Esys_FlushContext(ctx, session);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    *authPolicy = *policyDigest;
+    free(policyDigest);
+
+    return TSS2_RC_SUCCESS;
+}
+
+static TSS2_RC tpm_policy_define(struct crypt_device *cd,
+    ESYS_CONTEXT *ctx,
+    int tpm_pcr,
+    TPM2B_DIGEST *authPolicy)
+{
+    (void)(cd);
+    TSS2_RC r;
+    ESYS_TR session;
+    TPM2B_DIGEST *policyDigest;
+    TPMT_SYM_DEF sym = {.algorithm = TPM2_ALG_AES,
+                        .keyBits = {.aes = 128},
+                        .mode = {.aes = TPM2_ALG_CFB}
+    };
+
+    TPML_DIGEST orList = { .count = 2, .digests = {} };
+
+    r = tpm_policy_define_ChangeAuth(cd, ctx, &orList.digests[0]);
+    if (r != TSS2_RC_SUCCESS) {
+        return r;
+    }
+
+    r = tpm_policy_define_Read(cd, ctx, tpm_pcr, &orList.digests[1]);
+    if (r != TSS2_RC_SUCCESS) {
+        return r;
+    }
+
+    r = Esys_StartAuthSession(ctx, ESYS_TR_NONE, ESYS_TR_NONE,
+                    ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                    NULL, TPM2_SE_TRIAL, &sym, TPM2_ALG_SHA256,
+                    &session);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    r = Esys_PolicyOR(ctx, session,
+                      ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                      &orList);
+    if (r != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(ctx, session);
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    r = Esys_PolicyGetDigest(ctx, session,
+                    ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                    &policyDigest);
+    Esys_FlushContext(ctx, session);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    *authPolicy = *policyDigest;
+    free(policyDigest);
+
+    return TSS2_RC_SUCCESS;
+}
+
+static TSS2_RC tpm_policy_exec_Read(struct crypt_device *cd,
+    ESYS_CONTEXT *ctx,
+    int tpm_pcr,
+    ESYS_TR *sess)
+{
+    (void)(cd);
+    TSS2_RC r;
+    ESYS_TR session;
+    TPM2B_DIGEST *policyDigest;
+    TPML_DIGEST orList = { .count = 2, .digests = {} };
+
+    r = tpm_policy_define_ChangeAuth(cd, ctx, &orList.digests[0]);
+    if (r != TSS2_RC_SUCCESS) {
+        return r;
+    }
+
+    r = tpm_policy_init_Read(cd, ctx, tpm_pcr, TPM2_SE_POLICY, &session);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    r = Esys_PolicyGetDigest(ctx, session,
+                    ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                    &policyDigest);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        Esys_FlushContext(ctx, session);
+        return r;
+    }
+    orList.digests[1] = *policyDigest;
+    free(policyDigest);
+
+    r = Esys_PolicyOR(ctx, session,
+                      ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                      &orList);
+    if (r != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(ctx, session);
+        log_err(cd, "TPM returned error %08x", r);
+        return r;
+    }
+
+    *sess = session;
+
+    return TSS2_RC_SUCCESS;
+}
+
+static TSS2_RC tpm_nv_prep(struct crypt_device *cd,
+    long int tpm_nv,
+	const char *passphrase,
+	size_t passphrase_size,
+    ESYS_CONTEXT **ctx,
+    ESYS_TR *nvIndex)
+{
+    (void)(cd); /* Only needed for log_err */
+    TSS2_RC r;
+
+    TPM2B_AUTH tpm_passphrase = { .size = passphrase_size, .buffer={} };
+    if (passphrase_size > sizeof(tpm_passphrase.buffer))
+        return -1;
+	memcpy(&tpm_passphrase.buffer[0], passphrase, tpm_passphrase.size);
+
+    if (tpm_nv < 0x01800000 || tpm_nv > 0x01BFFFFF) {
+        log_err(cd, "NV index handle %08lx out of range", tpm_nv);
+        return -1;
+    }
+
+    r = tpm_init(cd, ctx);
+    if (r != TSS2_RC_SUCCESS)
+        return r;
+
+    r = Esys_TR_FromTPMPublic(*ctx, tpm_nv,
+                              ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                              nvIndex);
+    if (r != TSS2_RC_SUCCESS) {
+        Esys_Finalize(ctx);
+        return r;
+    }
+
+    r = Esys_TR_SetAuth(*ctx, *nvIndex, &tpm_passphrase);
+    if (r != TSS2_RC_SUCCESS) {
+        Esys_Finalize(ctx);
+        return r;
+    }
+
+    return r;
+}
+
+static TSS2_RC tpm_nv_read(struct crypt_device *cd,
+    long int tpm_nv,
+    int tpm_pcr,
+	const char *passphrase,
+	size_t passphrase_size,
+    TPM2B_MAX_NV_BUFFER **nv_pass)
+{
+    TSS2_RC r;
+    ESYS_CONTEXT *ctx;
+    ESYS_TR nvIndex, session;
+
+    r = tpm_nv_prep(cd, tpm_nv, passphrase, passphrase_size, &ctx,
+                    &nvIndex);
+    if (r != TSS2_RC_SUCCESS)
+        return r;
+
+    r = tpm_policy_exec_Read(cd, ctx, tpm_pcr, &session);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        Esys_Finalize(&ctx);
+        return -666;
+    }
+
+    r = Esys_NV_Read(ctx, nvIndex, nvIndex,
+                     session, ESYS_TR_NONE, ESYS_TR_NONE,
+                     32, 0, nv_pass);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+    }
+    Esys_Finalize(&ctx);
+    return r;
+}
+
+static TSS2_RC tpm_nv_define(struct crypt_device *cd,
+	const char *passphrase,
+	size_t passphrase_size,
+    long int tpm_nv,
+    int tpm_pcr,
+    const char *ownerpw,
+	size_t ownerpw_size,
+    TPM2B_MAX_NV_BUFFER *nv_pass)
+{
+    TSS2_RC r;
+    ESYS_CONTEXT *ctx;
+    ESYS_TR nvIndex;
+
+    TPM2B_DIGEST *random;
+
+    TPM2B_AUTH tpm_passphrase = { .size = passphrase_size, .buffer={} };
+    if (passphrase_size > sizeof(tpm_passphrase.buffer))
+        return -1;
+	memcpy(&tpm_passphrase.buffer[0], passphrase, tpm_passphrase.size);
+
+	TPM2B_NV_PUBLIC nvInfo = {
+		.size = 0,
+		.nvPublic = {
+			.nvIndex = tpm_nv,
+			.nameAlg = TPM2_ALG_SHA256,
+			.attributes = TPMA_NV_AUTHWRITE |
+                          TPMA_NV_POLICYREAD |
+                          TPMA_NV_NO_DA | /* TODO Remove */
+                          TPMA_NV_WRITEALL,
+			.authPolicy = {
+					 .size = 0,
+					 .buffer = {},
+				 },
+			.dataSize = 32
+		}
+    };
+
+    if (tpm_nv < 0x01800000 || tpm_nv > 0x01BFFFFF) {
+        log_err(cd, "NV index handle %08lx out of range", tpm_nv);
+        return -1;
+    }
+
+    r = tpm_init(cd, &ctx);
+    if (r != TSS2_RC_SUCCESS)
+        return r;
+
+    if (ownerpw != NULL) {
+        TPM2B_AUTH ownerauth = { .size = ownerpw_size, .buffer={} };
+        if (ownerpw_size > sizeof(ownerauth.buffer))
+            return -1;
+	    memcpy(&ownerauth.buffer[0], ownerpw, ownerauth.size);
+
+        r = Esys_TR_SetAuth(ctx, ESYS_TR_RH_OWNER, &ownerauth);
+        if (r != TSS2_RC_SUCCESS) {
+            Esys_Finalize(&ctx);
+            return r;
+        }
+    }
+
+    r = tpm_policy_define(cd, ctx, tpm_pcr, &nvInfo.nvPublic.authPolicy);
+    if (r != TSS2_RC_SUCCESS) {
+        Esys_Finalize(&ctx);
+        return r;
+    }
+
+    r = Esys_NV_DefineSpace(ctx, ESYS_TR_RH_OWNER,
+                            ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
+                            &tpm_passphrase, &nvInfo,
+                            &nvIndex);
+    if (r != TSS2_RC_SUCCESS) {
+        Esys_Finalize(&ctx);
+        return r;
+    }
+
+    r = Esys_GetRandom(ctx, ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                       32, &random);
+    if (r != TSS2_RC_SUCCESS) {
+        Esys_Finalize(&ctx);
+        return r;
+    }
+    if (random->size != 32) {
+        log_err(cd, "TPM did not provide enough randomness");
+        Esys_Finalize(&ctx);
+        return r;
+    }
+
+    /* Some type conversion since they slightly differ. */
+    nv_pass->size = random->size;
+    if (nv_pass->size > sizeof(nv_pass->buffer)) {
+        free(random);
+        Esys_Finalize(&ctx);
+        return -1;
+    }
+    memcpy(&nv_pass->buffer[0], &random->buffer[0], nv_pass->size);
+    free(random);
+
+    r = Esys_NV_Write(ctx, nvIndex, nvIndex,
+                      ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
+                      nv_pass, 0);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "Error on NV_Write: %08x", r);
+    }
+
+    Esys_Finalize(&ctx);
+    return r;
+}
+
+static void tpm_nv_undefine(struct crypt_device *cd,
+    long int tpm_nv,
+    const char *ownerpw,
+	size_t ownerpw_size)
+{
+    TSS2_RC r;
+    ESYS_CONTEXT *ctx;
+    ESYS_TR nvIndex;
+
+    r = tpm_nv_prep(cd, tpm_nv, NULL, 0, &ctx, &nvIndex);
+    if (r != TSS2_RC_SUCCESS)
+        return;
+
+    r = Esys_NV_UndefineSpace(ctx, ESYS_TR_RH_OWNER, nvIndex,
+                              ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE);
+    Esys_Finalize(&ctx);
+    if (r != TSS2_RC_SUCCESS)
+        return;
+}
+
+int crypt_keyslot_add_by_tpm(struct crypt_device *cd,
+	int keyslot, // -1 any
+	const char *passphrase,
+	size_t passphrase_size,
+	const char *new_passphrase,
+	size_t new_passphrase_size,
+    long int tpm_nv,
+    int tpm_pcr,
+    long int tpm_nvnew,
+    int tpm_pcrnew,
+	const char *ownerpw,
+	size_t ownerpw_size)
+{
+    int ret = -666;
+
+    TPM2B_MAX_NV_BUFFER nv_pass, nv_passnew;
+    TPM2B_MAX_NV_BUFFER *tmp;
+
+    if (!tpm_nv && !tpm_nvnew) {
+        log_err(cd, "Either tpm_nv or tpm_nvnew must be provided");
+        return -666;
+    }
+
+    if (tpm_nv) {
+        if (tpm_nv_read(cd, tpm_nv, tpm_pcr, passphrase, passphrase_size, &tmp))
+            return ret;
+        nv_pass = *tmp;
+        free(tmp);
+    } else {
+        nv_pass.size = passphrase_size;
+        memcpy(&nv_pass.buffer[0], passphrase, nv_pass.size);
+    }
+
+    if (tpm_nvnew) {
+        if (tpm_nv_define(cd, new_passphrase, new_passphrase_size,
+                          tpm_nvnew, tpm_pcrnew, ownerpw, ownerpw_size, &nv_passnew))
+            return ret;
+    } else {
+        nv_passnew.size = new_passphrase_size;
+        memcpy(&nv_passnew.buffer[0], new_passphrase, nv_passnew.size);
+    }
+
+    ret = crypt_keyslot_add_by_passphrase(cd, keyslot,
+                    (char *) &nv_pass.buffer[0], nv_pass.size,
+                    (char *) &nv_passnew.buffer[0], nv_passnew.size);
+
+    if (ret < 0 && tpm_nvnew)
+        tpm_nv_undefine(cd, tpm_nvnew, ownerpw, ownerpw_size);
+
+    return ret;
+}
+
+int crypt_activate_by_tpm(struct crypt_device *cd,
+	const char *name,
+	int keyslot,
+	const char *passphrase,
+	size_t passphrase_size,
+	uint32_t flags,
+    long int tpm_nv,
+    int tpm_pcr)
+{
+    int ret = -666;
+    TPM2B_MAX_NV_BUFFER *nv_pass;
+
+    if (tpm_nv_read(cd, tpm_nv, tpm_pcr, passphrase, passphrase_size, &nv_pass))
+        return ret;
+
+    ret = crypt_activate_by_passphrase(cd, name, keyslot,
+                (char *) &nv_pass->buffer[0], nv_pass->size, flags);
+    free(nv_pass);
+    return ret;
+}
+
+int crypt_keyslot_change_by_tpm(struct crypt_device *cd,
+	int keyslot_old,
+	int keyslot_new,
+	const char *passphrase,
+	size_t passphrase_size,
+	const char *new_passphrase,
+	size_t new_passphrase_size,
+    long int tpm_nv,
+    int tpm_pcr)
+{
+    int ret = -666;
+    TSS2_RC r;
+    ESYS_CONTEXT *ctx;
+    ESYS_TR nvIndex, session;
+    TPM2B_MAX_NV_BUFFER *nv_pass;
+
+    TPM2B_AUTH tpm_new_passphrase = { .size = new_passphrase_size, .buffer={} };
+    if (new_passphrase_size > sizeof(tpm_new_passphrase.buffer))
+        return ret;
+	memcpy(&tpm_new_passphrase.buffer[0], new_passphrase,
+           tpm_new_passphrase.size);
+
+    r = tpm_nv_prep(cd, tpm_nv, passphrase, passphrase_size, &ctx, &nvIndex);
+    if (r != TSS2_RC_SUCCESS)
+        return -666;
+
+    r = tpm_policy_exec_Read(cd, ctx, tpm_pcr, &session);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        Esys_Finalize(&ctx);
+        return -666;
+    }
+
+    r = Esys_NV_Read(ctx, nvIndex, nvIndex,
+                     session, ESYS_TR_NONE, ESYS_TR_NONE,
+                     32, 0, &nv_pass);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        Esys_Finalize(&ctx);
+        return ret;
+    }
+
+    /* For safety reasons we check that the TPM index is actually associated
+     * with a keyslot. Only then will we change the TPM's auth value.
+     * Since the slot value was generated randomly, no need to change it. */
+    ret = crypt_keyslot_change_by_passphrase(cd, keyslot_old, keyslot_new,
+                (char *) &nv_pass->buffer[0], nv_pass->size,
+                (char *) &nv_pass->buffer[0], nv_pass->size);
+    free(nv_pass);
+    if (ret < 0) {
+        Esys_Finalize(&ctx);
+        return ret;
+    }
+
+    r = tpm_policy_exec_ChangeAuth(cd, ctx, tpm_pcr, &session);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        Esys_Finalize(&ctx);
+        return -666;
+    }
+
+    r = Esys_NV_ChangeAuth(ctx, nvIndex,
+                     session, ESYS_TR_NONE, ESYS_TR_NONE,
+                     &tpm_new_passphrase);
+    Esys_Finalize(&ctx);
+    if (r != TSS2_RC_SUCCESS) {
+        log_err(cd, "TPM returned error %08x", r);
+        return -666;
+    }
+
+    return ret;
+}
+
+int crypt_keyslot_add_tpm_by_volume_key(struct crypt_device *cd,
+	int keyslot,
+	const char *volume_key,
+	size_t volume_key_size,
+	const char *passphrase,
+	size_t passphrase_size,
+    long int tpm_nv,
+    int tpm_pcr,
+    const char *ownerpw,
+    size_t ownerpw_size)
+{
+    int ret = -666;
+
+    TPM2B_MAX_NV_BUFFER nv_pass;
+
+    if (tpm_nv_define(cd, passphrase, passphrase_size,
+                      tpm_nv, tpm_pcr, ownerpw, ownerpw_size, &nv_pass))
+        return ret;
+
+    ret = crypt_keyslot_add_by_volume_key(cd, keyslot, volume_key,
+                        volume_key_size,
+                        (char *) &nv_pass.buffer[0], nv_pass.size);
+
+    if (ret < 0 && tpm_nv)
+        tpm_nv_undefine(cd, tpm_nv, ownerpw, ownerpw_size);
+
+    return ret;
+}
+#endif /* WITH_TPM */
+

@@ -217,7 +217,7 @@ To use LUKS2, specify \fI\-\-type luks2\fR.
 \-\-keyfile\-offset, \-\-keyfile\-size, \-\-use\-random | \-\-use\-urandom,
 \-\-uuid, \-\-master\-key\-file, \-\-iter\-time, \-\-header,
 \-\-pbkdf\-force\-iterations,
-\-\-force\-password, \-\-disable-locks].
+\-\-force\-password, \-\-disable-locks, \-\-tpm].
 
 For LUKS2, additional \fB<options>\fR can be
 [\-\-integrity, \-\-integrity\-no\-wipe, \-\-sector\-size,
@@ -243,7 +243,7 @@ the command prompts for it interactively.
 \fB<options>\fR can be [\-\-key\-file, \-\-keyfile\-offset,
 \-\-keyfile\-size, \-\-readonly, \-\-test\-passphrase,
 \-\-allow\-discards, \-\-header, \-\-key-slot, \-\-master\-key\-file, \-\-token\-id,
-\-\-token\-only, \-\-disable\-keyring, \-\-disable\-locks].
+\-\-token\-only, \-\-disable\-keyring, \-\-disable\-locks, \-\-tpm].
 .PP
 \fIluksSuspend\fR <name>
 .IP
@@ -1082,6 +1082,13 @@ password quality checking support.
 
 For more info about password quality check, see the manual page
 for \fBpwquality.conf(5)\fR and \fBpasswdqc.conf(5)\fR.
+.TP
+.B "\-\-tpm=<nvindex>"
+The TPM is used in order to store the actual keyslot password inside its NV ram.
+
+Access to the NV ram is protected by the set password.
+
+The \fInvindex\fR is a value between 0x01800000 and 0x01BFFFFF of a free index.
 .TP
 .B "\-\-deferred"
 Defers device removal in \fIclose\fR command until the last user closes it.

@@ -765,6 +765,39 @@ int crypt_keyslot_add_by_passphrase(struct crypt_device *cd,
 	size_t new_passphrase_size);
 
 /**
+ * Add key slot using provided passphrase for TPM.
+ *
+ * Either tpm_nv or tpm_nvnew must be set.
+ *
+ * @pre @e cd contains initialized and formatted LUKS device context
+ *
+ * @param cd crypt device handle
+ * @param keyslot requested keyslot or @e CRYPT_ANY_SLOT
+ * @param passphrase passphrase used to unlock volume key
+ * @param passphrase_size size of passphrase (binary data)
+ * @param new_passphrase passphrase for new keyslot
+ * @param new_passphrase_size size of @e new_passphrase (binary data)
+ * @param tpm_nv the nv index inside the TPM
+ * @param tpm_nvnew the nv index inside the TPM for the new password
+ * @param tpm_ownerpw TPM's owner password for tpm_nvnew, if any; Usually NULL
+ * @param tpm_ownerpw_size size of ownerpw
+ *
+ * @return allocated key slot number or negative errno otherwise.
+ */
+int crypt_keyslot_add_by_tpm(struct crypt_device *cd,
+	int keyslot,
+	const char *passphrase,
+	size_t passphrase_size,
+	const char *new_passphrase,
+	size_t new_passphrase_size,
+    long int tpm_nv,
+    int tpm_pcr,
+    long int tpm_nvnew,
+    int tpm_pcrnew,
+	const char *ownerpw,
+	size_t ownerpw_size);
+
+/**
  * Change defined key slot using provided passphrase.
  *
  * @pre @e cd contains initialized and formatted LUKS device context
@@ -790,6 +823,36 @@ int crypt_keyslot_change_by_passphrase(struct crypt_device *cd,
 	size_t passphrase_size,
 	const char *new_passphrase,
 	size_t new_passphrase_size);
+
+/**
+ * Change defined key slot using provided passphrase using TPM.
+ *
+ * @pre @e cd contains initialized and formatted LUKS device context
+ *
+ * @param cd crypt device handle
+ * @param keyslot_old old keyslot or @e CRYPT_ANY_SLOT
+ * @param keyslot_new new keyslot (can be the same as old)
+ * @param passphrase passphrase used to unlock volume key
+ * @param passphrase_size size of passphrase (binary data)
+ * @param new_passphrase passphrase for new keyslot
+ * @param new_passphrase_size size of @e new_passphrase (binary data)
+ * @param tpm_nv the nv index inside the TPM
+ *
+ * @return allocated key slot number or negative errno otherwise.
+ *
+ * @note This function is just internal implementation of luksChange
+ * command to avoid reading of volume key outside libcryptsetup boundary
+ * in FIPS mode.
+ */
+int crypt_keyslot_change_by_tpm(struct crypt_device *cd,
+	int keyslot_old,
+	int keyslot_new,
+	const char *passphrase,
+	size_t passphrase_size,
+	const char *new_passphrase,
+	size_t new_passphrase_size,
+    long int tpm_nv,
+    int tpm_pcr);
 
 /**
 * Add key slot using provided key file path.
@@ -858,6 +921,34 @@ int crypt_keyslot_add_by_volume_key(struct crypt_device *cd,
 	size_t volume_key_size,
 	const char *passphrase,
 	size_t passphrase_size);
+
+/**
+ * Add key slot using provided volume key using the TPM.
+ *
+ * @pre @e cd contains initialized and formatted LUKS device context
+ *
+ * @param cd crypt device handle
+ * @param keyslot requested keyslot or CRYPT_ANY_SLOT
+ * @param volume_key provided volume key or @e NULL if used after crypt_format
+ * @param volume_key_size size of volume_key
+ * @param passphrase passphrase for new keyslot
+ * @param passphrase_size size of passphrase
+ * @param tpm_nv the nv index inside the TPM
+ * @param tpm_ownerpw the TPM's owner password, if any; Usually NULL
+ * @param tpm_ownerpw_size size of ownerpw
+ *
+ * @return allocated key slot number or negative errno otherwise.
+ */
+int crypt_keyslot_add_tpm_by_volume_key(struct crypt_device *cd,
+	int keyslot,
+	const char *volume_key,
+	size_t volume_key_size,
+	const char *passphrase,
+	size_t passphrase_size,
+    long int tpm_nv,
+    int tpm_pcr,
+    const char *tpm_ownerpw,
+    size_t tpm_ownerpw_size);
 
 /** create keyslot with volume key not associated with current dm-crypt segment */
 #define CRYPT_VOLUME_KEY_NO_SEGMENT (1 << 0)
@@ -1078,6 +1169,30 @@ int crypt_activate_by_passphrase(struct crypt_device *cd,
 	const char *passphrase,
 	size_t passphrase_size,
 	uint32_t flags);
+
+/**
+ * Activate device or check passphrase using the TPM.
+ *
+ * @param cd crypt device handle
+ * @param name name of device to create, if @e NULL only check passphrase
+ * @param keyslot requested keyslot to check or @e CRYPT_ANY_SLOT
+ * @param passphrase passphrase used to unlock volume key
+ * @param passphrase_size size of @e passphrase
+ * @param flags activation flags
+ * @param tpm_nv the nv index inside the TPM
+ * @param tpm_ownerpw the TPM's owner password, if any; Usually NULL
+ * @param tpm_ownerpw_size size of ownerpw
+ *
+ * @return unlocked key slot number or negative errno otherwise.
+ */
+int crypt_activate_by_tpm(struct crypt_device *cd,
+	const char *name,
+	int keyslot,
+	const char *passphrase,
+	size_t passphrase_size,
+	uint32_t flags,
+    long int tpm_nv,
+    int tpm_pcr);
 
 /**
  * Activate device or check using key file.

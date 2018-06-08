@@ -1,0 +1,87 @@
+#!/bin/bash
+
+echo "TPM tests"
+
+set -x
+
+set -eEuf
+
+TPMSIM=tpm_server
+
+PS4='$LINENO:'
+CRYPTSETUP=../cryptsetup
+
+PWD1="abc"
+PWD2="def"
+PWD3="ghi"
+PWD4="jkl"
+IMG="luks-test-tpm.img"
+
+function prereq()
+{
+    if [ -f NVChip ]; then
+        echo "There is a leftover file NVChip in the test directory."
+        return 1
+    fi
+
+    if killall -0 $(basename $TPMSIM); then
+        echo "There is already a tpm_simulator running."
+        return 1
+    fi
+
+    trap "cleanup" EXIT
+}
+
+function prepare()
+{
+    test -f $IMG || dd if=/dev/zero of=$IMG bs=1k count=10000 >/dev/null 2>&1
+    $TPMSIM &
+}
+
+function cleanup()
+{
+    killall $(basename $TPMSIM) || true
+    rm NVChip || true
+    echo .
+}
+
+function error()
+{
+    echo "FAILED"
+}
+
+function fail()
+{
+    return 1
+}
+
+trap "error" ERR
+
+prereq
+
+prepare
+
+echo "===== Create a new LUKS image using a TPM nv index ====="
+echo "$PWD1" | $CRYPTSETUP luksFormat --tpm=0x01BFFFFE $IMG
+#echo "$PWD1" | $CRYPTSETUP luksOpen --tpm=0x01BFFFFE $IMG --test-passphrase
+echo "SUCCESS"
+
+#echo "===== Add a new password keyslot to a TPM backed LUKS ====="
+#echo -e "$PWD1\n$PWD2" | $CRYPTSETUP luksAddKey --tpm=0x01BFFFFE $IMG
+#echo "$PWD2" | $CRYPTSETUP luksOpen $IMG --test-passphrase
+#echo "SUCCESS"
+
+echo "===== Add a new TPM keyslot to a TPM backed LUKS with pcr selection ====="
+echo -e "$PWD1\n$PWD3" | $CRYPTSETUP luksAddKey --tpm=0x01BFFFFE --tpmnew=0x01BFFFFD --tpmpcrnew 0,15 $IMG
+echo "$PWD3" | $CRYPTSETUP luksOpen --tpm=0x01BFFFFD --tpmpcr 0,15 $IMG --test-passphrase
+echo "SUCCESS"
+
+echo "===== Checking for PCR selection mismatch ====="
+if $(echo "$PWD3" | $CRYPTSETUP luksOpen --tpm=0x01BFFFFD --tpmpcr 0 $IMG --test-passphrase); then fail; fi
+if $(echo "$PWD3" | $CRYPTSETUP luksOpen --tpm=0x01BFFFFD $IMG --test-passphrase); then fail; fi
+echo "SUCCESS"
+
+echo "===== Change password keyslot to a TPM backed LUKS ====="
+echo -e "$PWD1\n$PWD4" | $CRYPTSETUP luksChangeKey --tpm=0x01BFFFFE $IMG
+echo "$PWD4" | $CRYPTSETUP luksOpen --tpm=0x01BFFFFE $IMG --test-passphrase
+echo "SUCCESS"

@@ -15,7 +15,8 @@ cryptsetup_LDADD = -lm		\
 	@POPT_LIBS@		\
 	@PWQUALITY_LIBS@	\
 	@PASSWDQC_LIBS@		\
-	@UUID_LIBS@
+	@UUID_LIBS@         \
+	$(TSS2_ESYS_LIBS)
 
 sbin_PROGRAMS += cryptsetup
 
@@ -43,7 +44,8 @@ veritysetup_SOURCES =		\
 
 veritysetup_LDADD = -lm		\
 	libcryptsetup.la	\
-	@POPT_LIBS@
+	@POPT_LIBS@ \
+	$(TSS2_ESYS_LIBS) -ltss2-esys
 
 sbin_PROGRAMS += veritysetup
 
@@ -72,7 +74,8 @@ integritysetup_SOURCES =	\
 integritysetup_LDADD = -lm	\
 	libcryptsetup.la	\
 	@POPT_LIBS@		\
-	@UUID_LIBS@
+	@UUID_LIBS@ \
+	$(TSS2_ESYS_LIBS) -ltss2-esys
 
 sbin_PROGRAMS += integritysetup
 
@@ -103,7 +106,8 @@ cryptsetup_reencrypt_LDADD = -lm	\
 	@POPT_LIBS@			\
 	@PWQUALITY_LIBS@		\
 	@PASSWDQC_LIBS@			\
-	@UUID_LIBS@
+	@UUID_LIBS@ \
+	$(TSS2_ESYS_LIBS) -ltss2-esys
 
 sbin_PROGRAMS += cryptsetup-reencrypt
 

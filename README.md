@@ -1,3 +1,72 @@
+Introduction
+============
+
+This is is fork of [cryptsetup](https://gitlab.com/cryptsetup/cryptsetup) that adds commits for adding TPM 2.0 support.
+
+Testing on a developer machine
+==============================
+```
+export TPM2TSS=/path/to/tpm2tss
+export LD_LIBRAY_PATH=${TPM2TSS}/src/tss2-{tcti,mu,sys,esys}/.libs
+export PKG_CONFIG_PATH=${TPM2TSS}/lib
+./bootstrap
+./configure \
+    CFLAGS="-I${TPM2TSS}/include" \
+    LDFLAGS="-L${TPM2TSS}/src/tss2-{esys,sys,mu,tcti}/.libs"
+make
+make check TESTS=lukstpm
+```
+
+Installation on Ubuntu 18.04
+============================
+```
+./autogen.sh
+./configure --prefix=/usr --libdir=/lib/x86_64-linux-gnu --sbindir=/sbin --mandir=/usr/share/man --enable-libargon2 --enable-shared --enable-cryptsetup-reencrypt --enable-tpm
+make -j$(nproc)
+make install
+CTIDIR=$PWD
+pushd /
+patch -p1 <$CTIDIR/dist/initramfs-hooks-cryptroot.patch
+rm /usr/share/initramfs-tools/hooks/cryptroot.orig || true
+patch -p1 <$CTIDIR/dist/initramfs-scripts-local-top-cryptroot.patch
+popd
+```
+
+Usage
+=====
+
+Setup
+-----
+```
+cryptsetup luksFormat --tpm=0x1bffffe /dev/sdxx
+or
+cryptsetup luksAddKey --tpmnew=0x1bffffd --tpmpcr=0,1 /dev/sdxx
+```
+
+CLI-Usage
+---------
+```
+cryptsetup luksOpen --tpm=0x1bffffe /dev/sdxx --test-password
+cryptsetup luksOpen --tpm=0x1bffffd --tpmpcr=0,1 /dev/sdxx <name>
+```
+
+RootDevice-Usage
+----------------
+```
+/etc/crypttab:
+# <target name>	<source device>		<key file>	<options>
+luksroot	UUID=4f2a7322-7559-40bc-b2b6-58a5866da703	none	luks,tpm=0x1bffffd,tpmpcr=0:1
+
+/etc/fstab:
+# <file system> <mount point>   <type>  <options>       <dump>  <pass>
+/dev/mapper/luksroot    /               ext4    errors=remount-ro 0       1
+```
+
+
+
+Original README
+===============
+
 ![LUKS logo](https://gitlab.com/cryptsetup/cryptsetup/wikis/luks-logo.png)
 
 What the ...?

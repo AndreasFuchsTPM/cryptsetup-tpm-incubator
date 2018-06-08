@@ -5,6 +5,8 @@
  * Copyright (C) 2004-2007, Clemens Fruhwirth <clemens@endorphin.org>
  * Copyright (C) 2009-2018, Red Hat, Inc. All rights reserved.
  * Copyright (C) 2009-2018, Milan Broz
+ * Copyright (C) 2017, Bartosz Milejski
+ * Copyright (C) 2018, Fraunhofer SIT sponsored by Infineon Technologies AG
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,6 +23,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+#include "config.h"
 #include "cryptsetup.h"
 #include <uuid/uuid.h>
 
@@ -88,6 +91,14 @@ static int opt_persistent = 0;
 static const char *opt_label = NULL;
 static const char *opt_subsystem = NULL;
 static int opt_unbound = 0;
+#ifdef WITH_TPM
+static long int opt_tpm = 0;
+static long int opt_tpmnew = 0;
+static const char *opt_tpmpcr = NULL;
+static int opt_tpmpcrbits = 0;
+static const char *opt_tpmpcrnew = NULL;
+static int opt_tpmpcrnewbits = 0;
+#endif /* WITH_TPM */
 
 static const char **action_argv;
 static int action_argc;
@@ -1048,11 +1059,49 @@ static int action_luksFormat(void)
 	if (r < 0)
 		goto out;
 
-	r = crypt_keyslot_add_by_volume_key(cd, opt_key_slot,
-					    key, keysize,
-					    password, passwordLen);
-	if (r < 0)
-		goto out;
+#ifdef WITH_TPM
+    if (opt_tpm) {
+        /* First see if the NV index already exists */
+/*TODO
+        r = tools_tpm_nv_exists(opt_tpm);
+        if (r = 1) {
+            if (!yesDialog(_("The TPM nv index is already in use. Delete ?"),
+			              _("Operation aborted.\n"))) {
+                r = -EEXIST;
+                goto out;
+            }
+	        r = tools_get_key(NULL, &tmppw, &tmppwLen,
+			          opt_keyfile_offset, opt_keyfile_size, opt_key_file,
+			          opt_timeout, _verify_passphrase(0), 1, cd);
+	        if (r < 0)
+		        goto out;
+            r = tools_tpm_nv_delete(opt_tpm, tpmpw, tpmpwLen);
+        	crypt_safe_free(tpmpw);
+        }
+        if (r < 0)
+            goto out;
+*/
+        /* Create the NV index */
+	    r = crypt_keyslot_add_tpm_by_volume_key(cd, opt_key_slot,
+					        key, keysize,
+					        password, passwordLen,
+                            opt_tpm, opt_tpmpcrbits, NULL /*ownerpw*/, 0);
+	    if (r < 0)
+		    goto out;
+    } else {
+	    r = crypt_keyslot_add_by_volume_key(cd, opt_key_slot,
+					        key, keysize,
+					        password, passwordLen);
+	    if (r < 0)
+		    goto out;
+    }
+#else /* WITH_TPM */
+    r = crypt_keyslot_add_by_volume_key(cd, opt_key_slot,
+				        key, keysize,
+				        password, passwordLen);
+    if (r < 0)
+	    goto out;
+#endif /* WITH_TPM */
 
 	if (opt_integrity && !opt_integrity_no_wipe)
 		r = _wipe_data_device(cd);
@@ -1117,8 +1166,15 @@ static int action_open_luks(void)
 			if (r < 0)
 				goto out;
 
-			r = crypt_activate_by_passphrase(cd, activated_name,
-				opt_key_slot, password, passwordLen, activate_flags);
+		    r = crypt_activate_by_passphrase(cd, activated_name,
+			    opt_key_slot, password, passwordLen, activate_flags);
+#ifdef WITH_TPM
+            /* We always test the regular keyslots first before invoding TPM */
+            if (r < 0 && opt_tpm)
+			    r = crypt_activate_by_tpm(cd, activated_name,
+				    opt_key_slot, password, passwordLen, activate_flags,
+                    opt_tpm, opt_tpmpcrbits);
+#endif /* WITH_TPM */
 			tools_passphrase_msg(r);
 			check_signal(&r);
 			crypt_safe_free(password);
@@ -1411,8 +1467,13 @@ static int action_luksAddKey(void)
 			goto out;
 
 		/* Check password before asking for new one */
-		r = crypt_activate_by_passphrase(cd, NULL, CRYPT_ANY_SLOT,
-						 password, password_size, 0);
+	    r = crypt_activate_by_passphrase(cd, NULL, CRYPT_ANY_SLOT,
+					     password, password_size, 0);
+#ifdef WITH_TPM
+        if (r < 0 && opt_tpm)
+		    r = crypt_activate_by_tpm(cd, NULL, CRYPT_ANY_SLOT,
+						     password, password_size, 0, opt_tpm, opt_tpmpcrbits);
+#endif /* WITH_TPM */
 		check_signal(&r);
 		tools_passphrase_msg(r);
 		if (r < 0)
@@ -1425,9 +1486,26 @@ static int action_luksAddKey(void)
 		if (r < 0)
 			goto out;
 
-		r = crypt_keyslot_add_by_passphrase(cd, opt_key_slot,
-						    password, password_size,
-						    password_new, password_new_size);
+#ifdef WITH_TPM
+        if (opt_tpmnew)
+		    r = crypt_keyslot_add_by_tpm(cd, opt_key_slot,
+						        password, password_size,
+						        password_new, password_new_size,
+                                0, 0, opt_tpmnew, opt_tpmpcrnewbits, NULL, 0);
+        else
+		    r = crypt_keyslot_add_by_passphrase(cd, opt_key_slot,
+						        password, password_size,
+						        password_new, password_new_size);
+        if (r < 0 && opt_tpm)
+		    r = crypt_keyslot_add_by_tpm(cd, opt_key_slot,
+						        password, password_size,
+						        password_new, password_new_size,
+                                opt_tpm, opt_tpmpcrbits, opt_tpmnew, opt_tpmpcrnewbits, NULL, 0);
+#else /* WITH_TPM */
+	    r = crypt_keyslot_add_by_passphrase(cd, opt_key_slot,
+					        password, password_size,
+					        password_new, password_new_size);
+#endif /* WITH_TPM */
 	}
 out:
 	crypt_safe_free(password);
@@ -1469,8 +1547,13 @@ static int action_luksChangeKey(void)
 		goto out;
 
 	/* Check password before asking for new one */
-	r = crypt_activate_by_passphrase(cd, NULL, opt_key_slot,
-					 password, password_size, 0);
+    r = crypt_activate_by_passphrase(cd, NULL, opt_key_slot,
+				     password, password_size, 0);
+#ifdef WITH_TPM
+    if (r < 0 && opt_tpm)
+	    r = crypt_activate_by_tpm(cd, NULL, opt_key_slot,
+					     password, password_size, 0, opt_tpm, opt_tpmpcrbits);
+#endif /* WITH_TPM */
 	tools_passphrase_msg(r);
 	check_signal(&r);
 	if (r < 0)
@@ -1484,8 +1567,14 @@ static int action_luksChangeKey(void)
 	if (r < 0)
 		goto out;
 
-	r = crypt_keyslot_change_by_passphrase(cd, opt_key_slot, opt_key_slot,
-		password, password_size, password_new, password_new_size);
+    r = crypt_keyslot_change_by_passphrase(cd, opt_key_slot, opt_key_slot,
+	    password, password_size, password_new, password_new_size);
+#ifdef WITH_TPM
+    if (r < 0 && opt_tpm)
+	    r = crypt_keyslot_change_by_tpm(cd, opt_key_slot, opt_key_slot,
+		    password, password_size, password_new, password_new_size, opt_tpm,
+            opt_tpmpcrbits);
+#endif /* WITH_TPM */
 out:
 	crypt_safe_free(password);
 	crypt_safe_free(password_new);
@@ -2197,6 +2286,12 @@ int main(int argc, const char **argv)
 		{ "integrity-no-wipe", '\0', POPT_ARG_NONE, &opt_integrity_no_wipe,     0, N_("Do not wipe device after format"), NULL },
 		{ "token-only",        '\0', POPT_ARG_NONE, &opt_token_only,            0, N_("Do not ask for passphrase if activation by token fails"), NULL },
 		{ "token-id",          '\0', POPT_ARG_INT, &opt_token,                  0, N_("Token number (default: any)"), NULL },
+#ifdef WITH_TPM
+		{ "tpm",               '\0', POPT_ARG_LONG, &opt_tpm,                   0, N_("Use TPM's NV-Space."), N_("[0x01800000..0x01BFFFFF]") },
+		{ "tpmnew",            '\0', POPT_ARG_LONG, &opt_tpmnew,                0, N_("Use TPM's NV-Space for new key in luksAddKey"), N_("[0x01800000..0x01BFFFFF]") },
+		{ "tpmpcr",            '\0', POPT_ARG_STRING, &opt_tpmpcr,              0, N_("Selection of TPM PCR values"), N_("<pcr>[,<pcr>[,<pcr>[...]]]") },
+		{ "tpmpcrnew",         '\0', POPT_ARG_STRING, &opt_tpmpcrnew,           0, N_("Selection of TPM PCR values for new key in luksAddKey"), N_("<pcr>[,<pcr>[,<pcr>[...]]]") },
+#endif /* WITH_TPM */
 		{ "key-description",   '\0', POPT_ARG_STRING, &opt_key_description,     0, N_("Key description"), NULL },
 		{ "sector-size",       '\0', POPT_ARG_INT, &opt_sector_size,            0, N_("Encryption sector size (default: 512 bytes)"), NULL },
 		{ "persistent",	       '\0', POPT_ARG_NONE, &opt_persistent,            0, N_("Set activation flags persistent for device"), NULL },
@@ -2287,6 +2382,42 @@ int main(int argc, const char **argv)
 	/* Count args, somewhat unnice, change? */
 	while(action_argv[action_argc] != NULL)
 		action_argc++;
+
+#ifdef WITH_TPM
+    if (opt_tpmpcr) {
+        char *s = strdup(opt_tpmpcr);
+        char *p = strtok(s, ",");
+        if (!p)
+		    usage(popt_context, EXIT_FAILURE, _("PCR values missing."),
+		          poptGetInvocationName(popt_context));
+        while (p) {
+            int i;
+            if (sscanf(p, "%i", &i) != 1 || i >= 24)
+		        usage(popt_context, EXIT_FAILURE, _("Wrong PCR value."),
+		              poptGetInvocationName(popt_context));
+            opt_tpmpcrbits |= 1 << i;
+            p = strtok(NULL, ",");
+        }
+        free(s);
+    }
+
+    if (opt_tpmpcrnew) {
+        char *s = strdup(opt_tpmpcrnew);
+        char *p = strtok(s, ",");
+        if (!p)
+		    usage(popt_context, EXIT_FAILURE, _("PCR values missing."),
+		          poptGetInvocationName(popt_context));
+        while (p) {
+            int i;
+            if (sscanf(p, "%i", &i) != 1 || i >= 24)
+		        usage(popt_context, EXIT_FAILURE, _("Wrong PCR value."),
+		              poptGetInvocationName(popt_context));
+            opt_tpmpcrnewbits |= 1 << i;
+            p = strtok(NULL, ",");
+        }
+        free(s);
+    }
+#endif /* WITH_TPM */
 
 	/* Handle aliases */
 	if (!strcmp(aname, "create")) {
