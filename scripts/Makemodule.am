@@ -1,5 +1,0 @@
-DISTCLEAN_TARGETS += scripts/cryptsetup.conf
-
-if CRYPTSETUP_TMPFILE
-tmpfilesd_DATA += scripts/cryptsetup.conf
-endif
