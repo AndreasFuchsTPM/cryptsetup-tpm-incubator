@@ -93,3 +93,9 @@ libcryptsetup_la_SOURCES = \
 	lib/luks2/luks2_token.c		\
 	lib/luks2/luks2_internal.h	\
 	lib/luks2/luks2.h
+
+if WITH_TPM2
+libcryptsetup_la_SOURCES += lib/luks2/luks2_keyslot_tpm2.c
+libcryptsetup_la_LIBADD  += @TSS2_ESYS_LIBS@
+endif #WITH_TPM2
+

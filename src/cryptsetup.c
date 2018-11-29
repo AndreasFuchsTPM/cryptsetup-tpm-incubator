@@ -5,6 +5,8 @@
  * Copyright (C) 2004-2007, Clemens Fruhwirth <clemens@endorphin.org>
  * Copyright (C) 2009-2018, Red Hat, Inc. All rights reserved.
  * Copyright (C) 2009-2018, Milan Broz
+ * Copyright (C) 2017, Bartosz Milejski
+ * Copyright (C) 2018, Fraunhofer SIT sponsored by Infineon Technologies AG
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -88,6 +90,16 @@ static int opt_persistent = 0;
 static const char *opt_label = NULL;
 static const char *opt_subsystem = NULL;
 static int opt_unbound = 0;
+#ifdef WITH_TPM2
+static int opt_tpm = 0;
+static long int opt_tpmnv = 0;
+static const char *opt_tpmpcr = NULL;
+static int opt_tpmpcrbits = 0;
+static const char *opt_tpmbanks = NULL;
+static int opt_tpmbankbits = 0;
+static int opt_tpmdaprotect = 0;
+static int opt_tpmflags = 0;
+#endif /* WITH_TPM2 */
 
 static const char **action_argv;
 static int action_argc;
@@ -1048,9 +1060,17 @@ static int action_luksFormat(void)
 	if (r < 0)
 		goto out;
 
-	r = crypt_keyslot_add_by_volume_key(cd, opt_key_slot,
-					    key, keysize,
-					    password, passwordLen);
+#ifdef WITH_TPM2
+	if (opt_tpm)
+		r = crypt_keyslot_tpm_add_by_key(cd, opt_key_slot, key, keysize,
+		                                 password, passwordLen, 0,
+		                                 opt_tpmnv, opt_tpmpcrbits,
+                                         opt_tpmbankbits, opt_tpmflags);      
+	else
+#endif /* WITH_TPM2 */
+		r = crypt_keyslot_add_by_volume_key(cd, opt_key_slot, key, keysize,
+		                                    password, passwordLen);
+
 	if (r < 0)
 		goto out;
 
@@ -1425,9 +1445,20 @@ static int action_luksAddKey(void)
 		if (r < 0)
 			goto out;
 
-		r = crypt_keyslot_add_by_passphrase(cd, opt_key_slot,
+#ifdef WITH_TPM2
+        if (opt_tpm)
+    		r = crypt_keyslot_tpm_add_by_passphrase(cd, opt_key_slot,
+						    password, password_size,
+						    password_new, password_new_size,
+                            opt_tpmnv, opt_tpmpcrbits,
+                            opt_tpmbankbits, opt_tpmflags);
+        else
+#endif /* WITH_TPM2 */
+    		r = crypt_keyslot_add_by_passphrase(cd, opt_key_slot,
 						    password, password_size,
 						    password_new, password_new_size);
+
+
 	}
 out:
 	crypt_safe_free(password);
@@ -2197,6 +2228,13 @@ int main(int argc, const char **argv)
 		{ "integrity-no-wipe", '\0', POPT_ARG_NONE, &opt_integrity_no_wipe,     0, N_("Do not wipe device after format"), NULL },
 		{ "token-only",        '\0', POPT_ARG_NONE, &opt_token_only,            0, N_("Do not ask for passphrase if activation by token fails"), NULL },
 		{ "token-id",          '\0', POPT_ARG_INT, &opt_token,                  0, N_("Token number (default: any)"), NULL },
+#ifdef WITH_TPM2
+		{ "tpm",               '\0', POPT_ARG_NONE, &opt_tpm,                   0, N_("Use TPM."), NULL },
+		{ "tpm-nv",            '\0', POPT_ARG_LONG, &opt_tpmnv,                 0, N_("Select TPM's NV index."), N_("<0x01800000..0x01BFFFFF> (Default: 0x01BF0000..0x01BF00FF)") },
+		{ "tpm-pcr",           '\0', POPT_ARG_STRING, &opt_tpmpcr,              0, N_("Selection of TPM PCRs"), N_("<pcr>[,<pcr>[,<pcr>[...]]] (Default: None") },
+		{ "tpm-bank",          '\0', POPT_ARG_STRING, &opt_tpmbanks,            0, N_("Selection of TPM PCR banks"), N_("<hash1>[,<hash2>[,<hash3>[...]]] (Supported: sha1, sha256, sha384, Default: All available") },
+		{ "tpm-daprotect",     '\0', POPT_ARG_NONE, &opt_tpmdaprotect,          0, N_("Enable TPM dictionary attack protection."), NULL},
+#endif /* WITH_TPM2 */
 		{ "key-description",   '\0', POPT_ARG_STRING, &opt_key_description,     0, N_("Key description"), NULL },
 		{ "sector-size",       '\0', POPT_ARG_INT, &opt_sector_size,            0, N_("Encryption sector size (default: 512 bytes)"), NULL },
 		{ "persistent",	       '\0', POPT_ARG_NONE, &opt_persistent,            0, N_("Set activation flags persistent for device"), NULL },
@@ -2287,6 +2325,51 @@ int main(int argc, const char **argv)
 	/* Count args, somewhat unnice, change? */
 	while(action_argv[action_argc] != NULL)
 		action_argc++;
+
+#ifdef WITH_TPM2
+    if ((opt_tpmnv || opt_tpmpcr || opt_tpmbanks || opt_tpmdaprotect) && !opt_tpm)
+	    usage(popt_context, EXIT_FAILURE, _("--tpm missing."),
+	          poptGetInvocationName(popt_context));
+
+    if (opt_tpmpcr) {
+        char *s = strdup(opt_tpmpcr);
+        char *p = strtok(s, ",");
+        if (!p)
+		    usage(popt_context, EXIT_FAILURE, _("PCR values missing."),
+		          poptGetInvocationName(popt_context));
+        while (p) {
+            int i;
+            if (sscanf(p, "%i", &i) != 1 || i >= 24)
+		        usage(popt_context, EXIT_FAILURE, _("Wrong PCR value."),
+		              poptGetInvocationName(popt_context));
+            opt_tpmpcrbits |= 1 << i;
+            p = strtok(NULL, ",");
+        }
+        free(s);
+    }
+    if (opt_tpmbanks) {
+        char *s = strdup(opt_tpmbanks);
+        char *p = strtok(s, ",");
+        if (!p)
+		    usage(popt_context, EXIT_FAILURE, _("PCR bank values missing."),
+		          poptGetInvocationName(popt_context));
+        while (p) {
+            if (!strcasecmp(p, "sha1"))
+                opt_tpmbankbits |= CRYPT_TPM_PCRBANK_SHA1;
+            else if (!strcasecmp(p, "sha256"))
+                opt_tpmbankbits |= CRYPT_TPM_PCRBANK_SHA256;
+            else if (!strcasecmp(p, "sha384"))
+                opt_tpmbankbits |= CRYPT_TPM_PCRBANK_SHA384;
+            else
+                usage(popt_context, EXIT_FAILURE, _("Unknown PCR bank value."),
+		              poptGetInvocationName(popt_context));
+            p = strtok(NULL, ",");
+        }
+        free(s);
+    }
+    if (!opt_tpmdaprotect)
+        opt_tpmflags |= CRYPT_TPM_FLAG_NODA;
+#endif /* WITH_TPM2 */
 
 	/* Handle aliases */
 	if (!strcmp(aname, "create")) {

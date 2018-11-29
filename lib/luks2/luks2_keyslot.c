@@ -23,9 +23,11 @@
 
 /* Internal implementations */
 extern const keyslot_handler luks2_keyslot;
+extern const keyslot_handler tpm_keyslot;
 
 static const keyslot_handler *keyslot_handlers[LUKS2_KEYSLOTS_MAX] = {
 	&luks2_keyslot,
+	&tpm_keyslot,
 	NULL
 };
 
@@ -134,6 +136,8 @@ int LUKS2_keyslot_params_default(struct crypt_device *cd, struct luks2_hdr *hdr,
 
 	if (!hdr || !pbkdf || !params)
 		return -EINVAL;
+
+    memset(params, 0, sizeof(*params));
 
 	params->af_type   = LUKS2_KEYSLOT_AF_LUKS1;
 	params->area_type = LUKS2_KEYSLOT_AREA_RAW;
@@ -363,15 +367,27 @@ int LUKS2_keyslot_store(struct crypt_device *cd,
 	const struct volume_key *vk,
 	const struct luks2_keyslot_params *params)
 {
+    const char* handler;
 	const keyslot_handler *h;
 	int r;
+
+    switch (params->area_type) {
+    case LUKS2_KEYSLOT_AREA_RAW:
+        handler = "luks2";
+        break;
+    case LUKS2_KEYSLOT_AREA_TPM:
+        handler = "tpm2";
+        break;
+    default:
+        return -EINVAL;
+    }
 
 	if (keyslot == CRYPT_ANY_SLOT)
 		return -EINVAL;
 
 	if (!LUKS2_get_keyslot_jobj(hdr, keyslot)) {
 		/* Try to allocate default and empty keyslot type */
-		h = LUKS2_keyslot_handler_type(cd, "luks2");
+		h = LUKS2_keyslot_handler_type(cd, handler);
 		if (!h)
 			return -EINVAL;
 
@@ -432,28 +448,30 @@ int LUKS2_keyslot_wipe(struct crypt_device *cd,
 	}
 	device_write_unlock(device);
 
-	/* secure deletion of possible key material in keyslot area */
-	r = crypt_keyslot_area(cd, keyslot, &area_offset, &area_length);
-	if (r && r != -ENOENT)
-		return r;
+    if (!!strcmp(h->name, "tpm2")) {
+	    /* secure deletion of possible key material in keyslot area */
+	    r = crypt_keyslot_area(cd, keyslot, &area_offset, &area_length);
+	    if (r && r != -ENOENT)
+		    return r;
 
-	/* We can destroy the binary keyslot area now without lock */
-	if (!r) {
-		r = crypt_wipe_device(cd, device, CRYPT_WIPE_SPECIAL, area_offset,
-			      area_length, area_length, NULL, NULL);
-		if (r) {
-			if (r == -EACCES) {
-				log_err(cd, _("Cannot write to device %s, permission denied."),
-					device_path(device));
-				r = -EINVAL;
-			} else
-				log_err(cd, _("Cannot wipe device %s."), device_path(device));
-			return r;
-		}
-	}
+	    /* We can destroy the binary keyslot area now without lock */
+	    if (!r) {
+		    r = crypt_wipe_device(cd, device, CRYPT_WIPE_SPECIAL, area_offset,
+			          area_length, area_length, NULL, NULL);
+		    if (r) {
+			    if (r == -EACCES) {
+				    log_err(cd, _("Cannot write to device %s, permission denied."),
+					    device_path(device));
+				    r = -EINVAL;
+			    } else
+				    log_err(cd, _("Cannot wipe device %s."), device_path(device));
+			    return r;
+		    }
+	    }
 
-	if (wipe_area_only)
-		return r;
+	    if (wipe_area_only)
+		    return r;
+    }
 
 	/* Slot specific wipe */
 	if (h) {

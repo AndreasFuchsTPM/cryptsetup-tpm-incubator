@@ -22,6 +22,7 @@
 #ifndef _CRYPTSETUP_LUKS2_ONDISK_H
 #define _CRYPTSETUP_LUKS2_ONDISK_H
 
+#include <stdbool.h>
 #include "libcryptsetup.h"
 
 #define LUKS2_MAGIC_1ST "LUKS\xba\xbe"
@@ -99,7 +100,7 @@ struct luks2_hdr {
 
 struct luks2_keyslot_params {
 	enum { LUKS2_KEYSLOT_AF_LUKS1 = 0 } af_type;
-	enum { LUKS2_KEYSLOT_AREA_RAW = 0 } area_type;
+	enum { LUKS2_KEYSLOT_AREA_RAW = 0, LUKS2_KEYSLOT_AREA_TPM = 1 } area_type;
 
 	union {
 	struct {
@@ -113,6 +114,12 @@ struct luks2_keyslot_params {
 		char encryption[65]; // or include utils_crypt.h
 		size_t key_size;
 	} raw;
+    struct {
+        uint32_t nvindex;
+        uint32_t pcrselection;
+        uint32_t pcrbanks;
+        bool noda;
+    } tpm;
 	} area;
 };
 

@@ -743,6 +743,18 @@ int crypt_resume_by_keyfile(struct crypt_device *cd,
 /** iterate through all keyslots and find first one that fits */
 #define CRYPT_ANY_SLOT -1
 
+/** Do not activate the TPM's Dictionary Attack protection for this key */
+#define CRYPT_TPM_FLAG_NODA (1 << 0)
+
+/** Flag for activating the SHA1 PCR bank */
+#define CRYPT_TPM_PCRBANK_SHA1 (1 << 0)
+
+/** Flag for activating the SHA256 PCR bank */
+#define CRYPT_TPM_PCRBANK_SHA256 (1 << 1)
+
+/** Flag for activating the SHA384 PCR bank */
+#define CRYPT_TPM_PCRBANK_SHA384 (1 << 2)
+
 /**
  * Add key slot using provided passphrase.
  *
@@ -763,6 +775,35 @@ int crypt_keyslot_add_by_passphrase(struct crypt_device *cd,
 	size_t passphrase_size,
 	const char *new_passphrase,
 	size_t new_passphrase_size);
+
+/**
+ * Add key slot using provided passphrase.
+ *
+ * @pre @e cd contains initialized and formatted LUKS device context
+ *
+ * @param cd crypt device handle
+ * @param keyslot requested keyslot or @e CRYPT_ANY_SLOT
+ * @param passphrase passphrase used to unlock volume key
+ * @param passphrase_size size of passphrase (binary data)
+ * @param new_passphrase passphrase for new keyslot
+ * @param new_passphrase_size size of @e new_passphrase (binary data)
+ * @param tpm_nvindex TPM's nv index to be used
+ * @param tpm_pcrselection Bitmask of TPM PCRs to be used
+ * @param tpm_pcrbanks Bitmask for the TPM PCR banks to be used
+ * @param tpm_flags Flags for the TPM, such as CRYPT_TPM_FLAG_NODA
+ *
+ * @return allocated key slot number or negative errno otherwise.
+ */
+int crypt_keyslot_tpm_add_by_passphrase(struct crypt_device *cd,
+	int keyslot,
+	const char *passphrase,
+	size_t passphrase_size,
+	const char *new_passphrase,
+	size_t new_passphrase_size,
+    uint32_t tpm_nvindex,
+    uint32_t tpm_pcrselection,
+    uint32_t tpm_pcrbanks,
+    uint32_t tpm_flags);
 
 /**
  * Change defined key slot using provided passphrase.
@@ -901,6 +942,51 @@ int crypt_keyslot_add_by_key(struct crypt_device *cd,
 	const char *passphrase,
 	size_t passphrase_size,
 	uint32_t flags);
+
+/**
+ * Add key slot using provided key.
+ *
+ * @pre @e cd contains initialized and formatted LUKS2 device context
+ *
+ * @param cd crypt device handle
+ * @param keyslot requested keyslot or CRYPT_ANY_SLOT
+ * @param volume_key provided volume key or @e NULL (see note below)
+ * @param volume_key_size size of volume_key
+ * @param passphrase passphrase for new keyslot
+ * @param passphrase_size size of passphrase
+ * @param flags key flags to set
+ * @param tpm_nvindex TPM's nv index to be used
+ * @param tpm_pcrselection Bitmask of TPM PCRs to be used
+ * @param tpm_pcrbanks Bitmask for the TPM PCR banks to be used
+ * @param tpm_flags Flags for the TPM, such as CRYPT_TPM_FLAG_NODA
+ *
+ * @return allocated key slot number or negative errno otherwise.
+ *
+ * @note in case volume_key is @e NULL following first matching rule will apply:
+ * @li if cd is device handle used in crypt_format() by current process, the volume
+ *     key generated (or passed) in crypt_format() will be stored in keyslot.
+ * @li if CRYPT_VOLUME_KEY_NO_SEGMENT flag is raised the new volume_key will be
+ *     generated and stored in keyslot. The keyslot will become unbound (unusable to
+ *     dm-crypt device activation).
+ * @li fails with -EINVAL otherwise
+ *
+ * @warning CRYPT_VOLUME_KEY_SET flag force updates volume key. It is @b not @b reencryption!
+ * 	    By doing so you will most probably destroy your ciphertext data device. It's supposed
+ * 	    to be used only in wrapped keys scheme for key refresh process where real (inner) volume
+ * 	    key stays untouched. It may be involed on active @e keyslot which makes the (previously
+ * 	    unbound) keyslot new regular keyslot.
+ */
+int crypt_keyslot_tpm_add_by_key(struct crypt_device *cd,
+	int keyslot,
+	const char *volume_key,
+	size_t volume_key_size,
+	const char *passphrase,
+	size_t passphrase_size,
+	uint32_t flags,
+    uint32_t tpm_nvindex,
+    uint32_t tpm_pcrselection,
+    uint32_t tpm_pcrbanks,
+    uint32_t tpm_flags);
 
 /**
  * Destroy (and disable) key slot.

@@ -592,6 +592,17 @@ esac
 AC_DEFINE_UNQUOTED([DEFAULT_LUKS_FORMAT], [$default_luks], [default LUKS format version])
 
 dnl ==========================================================================
+dnl TPM2TSS support
+AC_ARG_ENABLE([tpm2], AS_HELP_STRING([--enable-tpm2],[enable TPM2 support]),
+[with_tpm2=$enableval],
+[with_tpm2=no])
+if test "x$with_tpm2" = "xyes"; then
+    PKG_CHECK_MODULES([TSS2_ESYS],[tss2-esys])
+    AC_DEFINE_UNQUOTED([WITH_TPM2], [$with_tpm2], [Enable TPM2 support])
+fi
+AM_CONDITIONAL([WITH_TPM2], [test "x$with_tpm2" = "xyes"])
+
+dnl ==========================================================================
 
 AC_CONFIG_FILES([ Makefile
 lib/libcryptsetup.pc

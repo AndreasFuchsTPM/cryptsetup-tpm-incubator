@@ -603,7 +603,8 @@ static int hdr_validate_segments(json_object *hdr_jobj)
 static int hdr_validate_areas(json_object *hdr_jobj)
 {
 	struct interval *intervals;
-	json_object *jobj_keyslots, *jobj_offset, *jobj_length, *jobj_segments, *jobj_area;
+	json_object *jobj_keyslots, *jobj_offset, *jobj_length, *jobj_segments, *jobj_type, *jobj_area;
+    const char *type;
 	int length, ret, i = 0;
 	uint64_t first_offset;
 
@@ -631,34 +632,48 @@ static int hdr_validate_areas(json_object *hdr_jobj)
 	}
 
 	json_object_object_foreach(jobj_keyslots, key, val) {
+        if (!(jobj_area = json_contains(val, key, "Keyslot", "area", json_type_object)) ||
+            !(jobj_type = json_contains(jobj_area, key, "Keyslot", "type", json_type_string)) ||
+            !(type = json_object_get_string(jobj_type)) ||
+            (strcmp(type, "raw") && strcmp(type, "tpm2nv"))) {
+            log_dbg("Unknown keyslot area type: %s", type);
+            free(intervals);
+            return 1;
+        }
 
-		if (!(jobj_area = json_contains(val, key, "Keyslot", "area", json_type_object)) ||
+		if (!strcmp(type, "raw") && (
 		    !(jobj_offset = json_contains(jobj_area, key, "Keyslot", "offset", json_type_string)) ||
 		    !(jobj_length = json_contains(jobj_area, key, "Keyslot", "size", json_type_string)) ||
 		    !numbered("offset", json_object_get_string(jobj_offset)) ||
-		    !numbered("size", json_object_get_string(jobj_length))) {
+		    !numbered("size", json_object_get_string(jobj_length)))) {
 			free(intervals);
 			return 1;
 		}
 
 		/* rule out values > UINT64_MAX */
-		if (!json_str_to_uint64(jobj_offset, &intervals[i].offset) ||
-		    !json_str_to_uint64(jobj_length, &intervals[i].length)) {
+		if (!strcmp(type, "raw") && (
+            !json_str_to_uint64(jobj_offset, &intervals[i].offset) ||
+		    !json_str_to_uint64(jobj_length, &intervals[i].length))) {
 			free(intervals);
 			return 1;
 		}
 
-		i++;
-	}
+		if (!strcmp(type, "tpm2nv") && (
+            !(jobj_area = json_contains(val, key, "Keyslot", "area", json_type_object)) ||
+		    !json_contains(jobj_area, key, "Keyslot", "nvindex", json_type_int) ||
+		    !json_contains(jobj_area, key, "Keyslot", "pcrselection", json_type_int) ||
+		    !json_contains(jobj_area, key, "Keyslot", "pcrbanks", json_type_int) ||
+		    !json_contains(jobj_area, key, "Keyslot", "noda", json_type_boolean))) {
+			free(intervals);
+			return 1;
+		}
 
-	if (length != i) {
-		free(intervals);
-		return 1;
+		if (!strcmp(type, "raw")) i++;
 	}
 
 	first_offset = get_first_data_offset(jobj_segments, NULL);
 
-	ret = validate_intervals(length, intervals, &first_offset) ? 0 : 1;
+	ret = validate_intervals(i, intervals, &first_offset) ? 0 : 1;
 
 	free(intervals);
 
@@ -732,6 +747,9 @@ static int validate_keyslots_size(json_object *hdr_jobj, json_object *jobj_keysl
 
 	json_object_object_foreach(jobj_keyslots, key, val) {
 		UNUSED(key);
+		json_object_object_get_ex(val, "type", &jobj);
+        if (!strcmp("tpm2", json_object_get_string(jobj)))
+            continue;
 		json_object_object_get_ex(val, "area", &jobj);
 		json_object_object_get_ex(jobj, "size", &jobj1);
 		keyslots_area_sum += json_object_get_uint64(jobj1);
@@ -1666,39 +1684,62 @@ static int luks2_keyslot_area_params(json_object *jobj_area, struct luks2_keyslo
 
 	/* currently we only support raw length preserving area encryption */
 	json_object_object_get_ex(jobj_area, "type", &jobj_type);
-	if (strcmp(json_object_get_string(jobj_type), "raw"))
+	if (!strcmp(json_object_get_string(jobj_type), "raw")) {
+		/* process raw area encryption params */
+		json_object_object_get_ex(jobj_area, "encryption", &jobj1);
+		r = snprintf(params->area.raw.encryption, sizeof(params->area.raw.encryption), "%s",
+		             json_object_get_string(jobj1));
+		if (r < 0 || (size_t)r >= sizeof(params->area.raw.encryption))
+			return 1;
+		json_object_object_get_ex(jobj_area, "key_size", &jobj1);
+		params->area.raw.key_size = json_object_get_int(jobj1);
+
+		params->area_type = LUKS2_KEYSLOT_AREA_RAW;
+
+	    return 0;
+	} else if (!strcmp(json_object_get_string(jobj_type), "tpm2nv")) {
+		if (!json_object_object_get_ex(jobj_area, "nvindex", &jobj1))
+			return 1;
+		params->area.tpm.nvindex = json_object_get_uint64(jobj1);
+
+		if (!json_object_object_get_ex(jobj_area, "pcrselection", &jobj1))
+			return 1;
+		params->area.tpm.pcrselection = json_object_get_int(jobj1);
+
+		if (!json_object_object_get_ex(jobj_area, "pcrbanks", &jobj1))
+			return 1;
+		params->area.tpm.pcrbanks = json_object_get_int(jobj1);
+
+		if (!json_object_object_get_ex(jobj_area, "noda", &jobj1))
+			return 1;
+		params->area.tpm.noda = json_object_get_boolean(jobj1);
+
+        params->area_type = LUKS2_KEYSLOT_AREA_TPM;
+
+		return 0;
+	} else
 		return 1;
-
-	/* process raw area encryption params */
-	json_object_object_get_ex(jobj_area, "encryption", &jobj1);
-	r = snprintf(params->area.raw.encryption, sizeof(params->area.raw.encryption), "%s",
-		     json_object_get_string(jobj1));
-	if (r < 0 || (size_t)r >= sizeof(params->area.raw.encryption))
-		return 1;
-	json_object_object_get_ex(jobj_area, "key_size", &jobj1);
-	params->area.raw.key_size = json_object_get_int(jobj1);
-
-	params->area_type = LUKS2_KEYSLOT_AREA_RAW;
-
-	return 0;
 }
 
 /* keyslot must be validated */
 int LUKS2_get_keyslot_params(struct luks2_hdr *hdr, int keyslot, struct luks2_keyslot_params *params)
 {
-	json_object *jobj_keyslot, *jobj_af, *jobj_area;
+	json_object *jobj_keyslot, *jobj_type, *jobj_af, *jobj_area;
 
 	jobj_keyslot = LUKS2_get_keyslot_jobj(hdr, keyslot);
 	if (!jobj_keyslot)
 		return -ENOENT;
 
-	if (!json_object_object_get_ex(jobj_keyslot, "area", &jobj_area) ||
-	    !json_object_object_get_ex(jobj_keyslot, "af", &jobj_af))
+	if (!json_object_object_get_ex(jobj_keyslot, "type", &jobj_type))
 		return -EINVAL;
 
-	if (luks2_keyslot_af_params(jobj_af, params))
+	if (!json_object_object_get_ex(jobj_keyslot, "area", &jobj_area) ||
+        luks2_keyslot_area_params(jobj_area, params))
 		return -EINVAL;
-	if (luks2_keyslot_area_params(jobj_area, params))
+
+	if (!strcmp("luks2", json_object_get_string(jobj_type)) &&
+        (!json_object_object_get_ex(jobj_keyslot, "af", &jobj_af) ||
+         luks2_keyslot_af_params(jobj_af, params)))
 		return -EINVAL;
 
 	return 0;

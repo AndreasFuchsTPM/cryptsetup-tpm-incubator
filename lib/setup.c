@@ -2524,16 +2524,24 @@ int crypt_resume_by_keyfile_offset(struct crypt_device *cd,
 /*
  * Keyslot manipulation
  */
-int crypt_keyslot_add_by_passphrase(struct crypt_device *cd,
+static int crypt_keyslot_all_add_by_passphrase(struct crypt_device *cd,
 	int keyslot, // -1 any
 	const char *passphrase,
 	size_t passphrase_size,
 	const char *new_passphrase,
-	size_t new_passphrase_size)
+	size_t new_passphrase_size,
+    int tpm,
+    uint32_t tpm_nvindex,
+    uint32_t tpm_pcrselection,
+    uint32_t tpm_pcrbanks,
+    uint32_t tpm_flags)
 {
 	int digest, r, active_slots;
 	struct luks2_keyslot_params params;
 	struct volume_key *vk = NULL;
+
+    if ((tpm_pcrselection || tpm_nvindex) && !tpm)
+        return -EINVAL;
 
 	log_dbg("Adding new keyslot, existing passphrase %sprovided,"
 		"new passphrase %sprovided.",
@@ -2541,6 +2549,11 @@ int crypt_keyslot_add_by_passphrase(struct crypt_device *cd,
 
 	if ((r = onlyLUKS(cd)))
 		return r;
+
+    if (isLUKS1(cd->type) && tpm) {
+        log_err(cd, "TPM is only supported for LUKS2.");
+        return -EINVAL;
+    }
 
 	if (!passphrase || !new_passphrase)
 		return -EINVAL;
@@ -2587,6 +2600,14 @@ int crypt_keyslot_add_by_passphrase(struct crypt_device *cd,
 		if (r >= 0)
 			r = LUKS2_keyslot_params_default(cd, &cd->u.luks2.hdr, vk->keylength, &params);
 
+        if (r >= 0 && tpm) {
+            params.area_type = LUKS2_KEYSLOT_AREA_TPM;
+            params.area.tpm.nvindex = tpm_nvindex;
+            params.area.tpm.pcrselection = tpm_pcrselection;
+            params.area.tpm.pcrbanks = tpm_pcrbanks;
+            params.area.tpm.noda = !!(tpm_flags & CRYPT_TPM_FLAG_NODA);
+        }
+
 		if (r >= 0)
 			r = LUKS2_digest_assign(cd, &cd->u.luks2.hdr, keyslot, digest, 1, 0);
 
@@ -2607,6 +2628,34 @@ out:
 		return r;
 	}
 	return keyslot;
+}
+
+int crypt_keyslot_tpm_add_by_passphrase(struct crypt_device *cd,
+	int keyslot, // -1 any
+	const char *passphrase,
+	size_t passphrase_size,
+	const char *new_passphrase,
+	size_t new_passphrase_size,
+    uint32_t tpm_nvindex,
+    uint32_t tpm_pcrselection,
+    uint32_t tpm_pcrbanks,
+    uint32_t tpm_flags)
+{
+    return crypt_keyslot_all_add_by_passphrase(cd, keyslot, 
+                passphrase, passphrase_size,
+                new_passphrase, new_passphrase_size, 1,
+                tpm_nvindex, tpm_pcrselection, tpm_pcrbanks, tpm_flags);
+}
+int crypt_keyslot_add_by_passphrase(struct crypt_device *cd,
+	int keyslot, // -1 any
+	const char *passphrase,
+	size_t passphrase_size,
+	const char *new_passphrase,
+	size_t new_passphrase_size)
+{
+    return crypt_keyslot_all_add_by_passphrase(cd, keyslot, 
+                passphrase, passphrase_size,
+                new_passphrase, new_passphrase_size, 0, 0, 0, 0, 0);
 }
 
 int crypt_keyslot_change_by_passphrase(struct crypt_device *cd,
@@ -2687,6 +2736,13 @@ int crypt_keyslot_change_by_passphrase(struct crypt_device *cd,
 				goto out;
 			}
 		}
+
+        if (keyslot_old != keyslot_new && 
+            params.area_type == LUKS2_KEYSLOT_AREA_TPM) {
+            /* If we go for a new keyslot here, then we need to allocate a new
+               nv-space inside the TPM. */
+            params.area.tpm.nvindex = 0;
+        }
 
 		r = LUKS2_keyslot_store(cd,  &cd->u.luks2.hdr,
 					keyslot_new, new_passphrase,
@@ -4306,13 +4362,18 @@ out:
 }
 
 
-int crypt_keyslot_add_by_key(struct crypt_device *cd,
+static int crypt_keyslot_all_add_by_key(struct crypt_device *cd,
 	int keyslot,
 	const char *volume_key,
 	size_t volume_key_size,
 	const char *passphrase,
 	size_t passphrase_size,
-	uint32_t flags)
+	uint32_t flags,
+    int tpm,
+    uint32_t tpm_nvindex,
+    uint32_t tpm_pcrselection,
+    uint32_t tpm_pcrbanks,
+    uint32_t tpm_flags)
 {
 	int digest, r;
 	struct luks2_keyslot_params params;
@@ -4321,6 +4382,9 @@ int crypt_keyslot_add_by_key(struct crypt_device *cd,
 	if (!passphrase || ((flags & CRYPT_VOLUME_KEY_NO_SEGMENT) &&
 			    (flags & CRYPT_VOLUME_KEY_SET)))
 		return -EINVAL;
+
+    if ((tpm_pcrselection || tpm_nvindex) && !tpm)
+        return -EINVAL;
 
 	log_dbg("Adding new keyslot %d with volume key %sassigned to a crypt segment.",
 		keyslot, flags & CRYPT_VOLUME_KEY_NO_SEGMENT ? "un" : "");
@@ -4361,6 +4425,14 @@ int crypt_keyslot_add_by_key(struct crypt_device *cd,
 	} else
 		r = LUKS2_keyslot_params_default(cd, &cd->u.luks2.hdr, vk->keylength, &params);
 
+    if (r >= 0 && tpm) {
+        params.area_type = LUKS2_KEYSLOT_AREA_TPM;
+        params.area.tpm.nvindex = tpm_nvindex;
+        params.area.tpm.pcrselection = tpm_pcrselection;
+        params.area.tpm.pcrbanks = tpm_pcrbanks;
+        params.area.tpm.noda = !!(tpm_flags & CRYPT_TPM_FLAG_NODA);
+    }
+
 	if (r < 0) {
 		log_err(cd, _("Failed to initialise default LUKS2 keyslot parameters."));
 		goto out;
@@ -4390,6 +4462,36 @@ out:
 		return r;
 	}
 	return keyslot;
+}
+
+int crypt_keyslot_tpm_add_by_key(struct crypt_device *cd,
+	int keyslot,
+	const char *volume_key,
+	size_t volume_key_size,
+	const char *passphrase,
+	size_t passphrase_size,
+	uint32_t flags,
+    uint32_t tpm_nvindex,
+    uint32_t tpm_pcrselection,
+    uint32_t tpm_pcrbanks,
+    uint32_t tpm_flags)
+{
+    return crypt_keyslot_all_add_by_key(cd, keyslot, volume_key, volume_key_size,
+        passphrase, passphrase_size, flags, 1, tpm_nvindex, tpm_pcrselection,
+        tpm_pcrbanks, tpm_flags);
+}
+
+
+int crypt_keyslot_add_by_key(struct crypt_device *cd,
+	int keyslot,
+	const char *volume_key,
+	size_t volume_key_size,
+	const char *passphrase,
+	size_t passphrase_size,
+	uint32_t flags)
+{
+    return crypt_keyslot_all_add_by_key(cd, keyslot, volume_key, volume_key_size,
+        passphrase, passphrase_size, flags, 0, 0, 0, 0, 0);
 }
 
 /*

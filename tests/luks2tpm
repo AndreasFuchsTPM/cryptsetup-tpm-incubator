@@ -1,0 +1,109 @@
+#!/bin/bash
+
+echo "TPM tests"
+
+set -eEuf
+
+PS4='$LINENO:'
+
+#Some debug options:
+#set -x
+
+#export TSS2_LOG=esys+trace
+export TSS2_LOG=all+none
+
+#CRYPTSETUP="libtool --mode=execute valgrind ../cryptsetup"
+#CRYPTSETUP="../cryptsetup --debug"
+CRYPTSETUP="../cryptsetup"
+
+#DUMP=$CRYPTSETUP luksDump $IMG
+DUMP=
+
+
+TPMSIM=tpm_server
+
+PWD1="abc"
+PWD2="def"
+PWD3="ghi"
+PWD4="jkl"
+IMG="luks2tpm-test.img"
+
+function prereq()
+{
+    if [ -f NVChip ]; then
+        echo "There is a leftover file NVChip in the test directory."
+        return 1
+    fi
+
+    if killall -0 $(basename $TPMSIM); then
+        echo "There is already a tpm_simulator running."
+        return 1
+    fi
+
+    trap "cleanup" EXIT
+}
+
+function prepare()
+{
+    test -f $IMG || dd if=/dev/zero of=$IMG bs=1k count=10000 >/dev/null 2>&1
+    $TPMSIM &
+}
+
+function cleanup()
+{
+    killall $(basename $TPMSIM) || true
+    rm NVChip || true
+    echo .
+}
+
+function error()
+{
+    echo "FAILED"
+}
+
+function fail()
+{
+    return 1
+}
+
+trap "error" ERR
+
+prereq
+
+prepare
+
+echo "===== Create a new LUKS image using a TPM nv index ====="
+echo "$PWD1" | $CRYPTSETUP luksFormat --type=luks2 --tpm $IMG
+echo "$PWD1" | $CRYPTSETUP luksOpen $IMG --test-passphrase
+$DUMP
+echo "SUCCESS"
+
+echo "===== Add a specific TPM keyslot to a TPM backed LUKS ====="
+echo -e "$PWD1\n$PWD2" | $CRYPTSETUP luksAddKey --tpm --tpm-nv=0x01BFFFFD $IMG
+echo "$PWD2" | $CRYPTSETUP luksOpen $IMG --test-passphrase
+$DUMP
+echo "SUCCESS"
+
+echo "===== Remove specific TPM keyslot to a TPM backed LUKS ====="
+echo -e "$PWD1" | $CRYPTSETUP luksKillSlot $IMG 1
+$DUMP
+echo "SUCCESS"
+
+echo "===== Add a PCR keyslot to a TPM backed LUKS ====="
+echo -e "$PWD1\n$PWD3" | $CRYPTSETUP luksAddKey --tpm --tpm-pcr=0,2,4,6 $IMG
+echo "$PWD3" | $CRYPTSETUP luksOpen $IMG --test-passphrase
+$DUMP
+echo "SUCCESS"
+
+echo "===== Remove specific TPM keyslot to a TPM backed LUKS ====="
+echo -e "$PWD3" | $CRYPTSETUP luksRemoveKey $IMG
+$DUMP
+echo "SUCCESS"
+
+echo "===== Change password on a TPM backed LUKS ====="
+echo -e "$PWD1\n$PWD4" | $CRYPTSETUP luksChangeKey $IMG
+echo "$PWD4" | $CRYPTSETUP luksOpen $IMG --test-passphrase
+$DUMP
+echo "SUCCESS"
+
+

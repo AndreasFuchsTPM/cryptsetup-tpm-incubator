@@ -32,6 +32,8 @@ CRYPTSETUP_2.0 {
 		crypt_keyslot_add_by_keyfile_device_offset;
 		crypt_keyslot_add_by_volume_key;
 		crypt_keyslot_add_by_key;
+		crypt_keyslot_tpm_add_by_key;
+        crypt_keyslot_tpm_add_by_passphrase;
 
 		crypt_keyslot_set_priority;
 		crypt_keyslot_get_priority;

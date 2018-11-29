@@ -179,9 +179,16 @@ Keyslot object contains information stored key - area, where it is stored
 (keyslot data), encryption, anti-forensic function, and Key Derivation Function
 and its parameters (PBKDF type, costs, salt).
 
-For now, only internal "luks2" keyslot type is available, it uses the same logic
+The internal "luks2" keyslot type is available, it uses the same logic
 as LUKS1 keyslot, but allows to define per-keyslot algorithms
 (for example different PBKDF).
+
+The new "tpm2" keyslot type is available for storing volume keys protected by a
+TPM2 security chip. It stores the volume key directly within the TPM's nv
+storage area. Read access to this area is protected by a password (optionally
+including the TPM's dictionary attack protection) and optionally a PCR
+restrinction, meaning that the key is only readable if certain PCR values are
+present inside the TPM.
 
 Digests section
 ~~~~~~~~~~~~~~~
