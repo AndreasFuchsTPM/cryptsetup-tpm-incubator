@@ -23,11 +23,15 @@
 
 /* Internal implementations */
 extern const keyslot_handler luks2_keyslot;
+#ifdef WITH_TPM2
 extern const keyslot_handler tpm_keyslot;
+#endif /* WITH_TPM2 */
 
 static const keyslot_handler *keyslot_handlers[LUKS2_KEYSLOTS_MAX] = {
 	&luks2_keyslot,
+#ifdef WITH_TPM2
 	&tpm_keyslot,
+#endif /* WITH_TPM2 */
 	NULL
 };
 
