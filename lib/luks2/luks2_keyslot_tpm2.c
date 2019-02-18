@@ -353,7 +353,10 @@ static TSS2_RC tpm_nv_read(struct crypt_device *cd,
                      session, ESYS_TR_NONE, ESYS_TR_NONE,
                      volume_key_len, 0, &nv_pass);
     if (r != TSS2_RC_SUCCESS) {
-        log_err(cd, "TPM returned error %08x", r);
+        /* We are silent about auth failures since they can appear intentionally
+           if multiple TPM keyslots are present */
+        if (r != 0x9a2)
+            log_err(cd, "TPM returned error %08x", r);
         r = Esys_FlushContext(ctx, session);
         Esys_Finalize(&ctx);
         return r;
