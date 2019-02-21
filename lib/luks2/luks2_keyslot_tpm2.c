@@ -56,53 +56,61 @@ static TSS2_RC tpm_getPcrBanks(struct crypt_device *cd,
     TSS2_RC r;
     ESYS_CONTEXT *ctx;
 
+    TPMI_ALG_HASH defaultAlgs[] = { TPM2_ALG_SHA1, TPM2_ALG_SHA256,
+                                    TPM2_ALG_SHA384 };
+
     r = tpm_init(cd, &ctx);
     if (r != TSS2_RC_SUCCESS)
         return r;
 
-    TPML_PCR_SELECTION readPCRs = { .count = 3, .pcrSelections = {
-        { .hash = TPM2_ALG_SHA1, .sizeofSelect = 3,
+    TPML_PCR_SELECTION readPCRs = { .count = 1, .pcrSelections = {
+        { .hash = TPM2_ALG_NULL, .sizeofSelect = 3,
           .pcrSelect = { 1, 0, 0 }},
-        { .hash = TPM2_ALG_SHA256, .sizeofSelect = 3,
-          .pcrSelect = { 1, 0, 0 }},
-        { .hash = TPM2_ALG_SHA384, .sizeofSelect = 3,
-          .pcrSelect = { 1, 0, 0 }}
     }};
     TPML_PCR_SELECTION *pcrs;
 
-    r = Esys_PCR_Read(ctx,
-                      ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
-                      &readPCRs, NULL, &pcrs, NULL);
-    Esys_Finalize(&ctx);
-    if (r) {
-        log_dbg("TPM returned 0x%08x.", r);
-        return r;
-    }
+    for (int i = 0; i < sizeof(defaultAlgs) / sizeof(defaultAlgs[0]); i++) {
+        log_dbg("Testing TPM for PCR bank %x.", defaultAlgs[i]);
+        readPCRs.pcrSelections[0].hash = defaultAlgs[i];
+        r = Esys_PCR_Read(ctx,
+                          ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                          &readPCRs, NULL, &pcrs, NULL);
+        if (r == (TPM2_RC_HASH | TPM2_RC_P | TPM2_RC_1)) {
+            log_dbg("Hash alg %x is not supported1.", defaultAlgs[i]);
+            continue;
+        }
+        if (r) {
+            Esys_Finalize(&ctx);
+            log_err(cd, "TPM returned 0x%08x.", r);
+            return r;
+        }
 
-    if (pcrs->count == 0) {
-        log_dbg("TPM does not support SHA256 nor SHA384 nor SHA1.");
-        return -1;
-    }
-
-    *pcrbanks = 0;
-    for (int i = 0; i < pcrs->count; i++) {
-        switch(pcrs->pcrSelections[i].hash) {
+        if (pcrs->pcrSelections[0].hash != defaultAlgs[i]) {
+            log_dbg("Hash alg %x is not supported2.", defaultAlgs[i]);
+            Esys_Free(pcrs);
+            continue;
+        }
+        switch(defaultAlgs[i]) {
         case TPM2_ALG_SHA1:
             *pcrbanks |= CRYPT_TPM_PCRBANK_SHA1;
             break;
         case TPM2_ALG_SHA256:
-            *pcrbanks |= CRYPT_TPM_PCRBANK_SHA1;
+            *pcrbanks |= CRYPT_TPM_PCRBANK_SHA256;
             break;
         case TPM2_ALG_SHA384:
-            *pcrbanks |= CRYPT_TPM_PCRBANK_SHA1;
+            *pcrbanks |= CRYPT_TPM_PCRBANK_SHA384;
             break;
         default:
+            Esys_Finalize(&ctx);
+            log_err(cd, "Unsupported hash alg %x.", defaultAlgs[i]);
             return -1;
         }
+        Esys_Free(pcrs);
     }
 
-    log_dbg("The TPM supports the following %i banks: 0x%08x.",
-            pcrs->count, *pcrbanks);
+    Esys_Finalize(&ctx);
+
+    log_dbg("The TPM supports the following banks: 0x%08x.", *pcrbanks);
 
     return 0;
 }
